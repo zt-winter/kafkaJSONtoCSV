@@ -1,15 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 
 	"github.com/Shopify/sarama"
-	"github.com/gocarina/gocsv"
 )
 
 type flowFeature struct {
@@ -96,10 +98,6 @@ type kafkaMessage struct {
 	Feature flowFeature `json:"feature"`
 }
 
-var (
-	wg sync.WaitGroup
-)
-
 func main() {
 	logFile, err := os.OpenFile("./consumer.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
@@ -109,8 +107,23 @@ func main() {
 	log.SetFlags(log.Llongfile | log.Ldate | log.Ltime)
 
 	featureFile, err := os.OpenFile("feature.csv", os.O_RDWR|os.O_CREATE|os.O_APPEND, os.ModePerm)
-
 	if err != nil {
+		log.Fatal(err)
+	}
+	defer featureFile.Close()
+
+	head := []string{"SrcIP", "DstIP", "SrcPort", "DstPort", "TransportLayer",
+		"UpTimeMean", "UpTimeStd", "UpTimeMin", "UpTimeMax", "DownTimeMean",
+		"DownTimeStd", "DownTimeMin", "DownTimeMax", "TimeMean", "TimeStd",
+		"TimeMin", "TimeMax", "UpPacketLenMean", "UpPacketLenStd", "UpPacketLenMin",
+		"UpPacketLenMax", "DownPacketLenMean", "DownPacketLenStd", "DownPacketLenMin",
+		"DownPacketLenMax", "PacketLenMean", "PacketLenStd", "PacketLenMin", "PacketLenMax",
+		"Duration", "UpPacketNum", "UpPacketNumMinute", "DownPacketNum", "DownPacketNumMinute",
+		"PacketNum", "PacketNumMinute", "DownUpPacketPercent", "UpHeadLenPercent", "DownHeadLenPercent",
+		"ExtensionNum", "ServerName"}
+
+	w := csv.NewWriter(featureFile)
+	if err := w.Write(head); err != nil {
 		log.Fatal(err)
 	}
 
@@ -118,66 +131,106 @@ func main() {
 	if err != nil {
 		log.Fatalln("sarama.NewConsumer Failed: ", err)
 	}
+	defer consumer.Close()
 
 	partitionList, err := consumer.Partitions("test")
 	if err != nil {
 		log.Fatalln("kafka partitonList error: ", err)
 	}
 
-	messages := []*kafkaMessage{}
+	ch := make(chan []byte)
 
 	fmt.Println(len(partitionList))
-	for partition := range partitionList {
-		cp, err := consumer.ConsumePartition("test", int32(partition), sarama.OffsetNewest)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer cp.AsyncClose()
-		fmt.Println("consumer begin")
-
-		wg.Add(1)
-
-		go func(sarama.PartitionConsumer, []*kafkaMessage) {
-			defer wg.Done()
-			for msg := range cp.Messages() {
-				var one kafkaMessage
-				err := json.Unmarshal(msg.Value, &one)
-				fmt.Println("recive one message")
-				if err != nil {
-					panic(err)
-				}
-				messages = append(messages, &one)
-			}
-			fmt.Println("goroutie done")
-		}(cp, messages)
-		wg.Wait()
-		consumer.Close()
-	}
-
-	/*
-		configFileH, err := os.OpenFile("./config", os.O_RDONLY, 0666)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer configFileH.Close()
-
-		reader := bufio.NewReader(configFileH)
-		for {
-			line, _, err := reader.ReadLine()
-			if err == io.EOF {
-				break
-			} else if err != nil {
+	go func() {
+		var wg sync.WaitGroup
+		for partition := range partitionList {
+			cp, err := consumer.ConsumePartition("test", int32(partition), sarama.OffsetNewest)
+			if err != nil {
 				log.Fatal(err)
 			}
+			defer cp.AsyncClose()
+			fmt.Println("consumer begin")
 
-			selectOne := string(line)
+			wg.Add(1)
+
+			go func(sarama.PartitionConsumer) {
+				defer wg.Done()
+				for msg := range cp.Messages() {
+					ch <- msg.Value
+					/*
+						err := json.Unmarshal(msg.Value, &one)
+						fmt.Println("recive one message")
+						if err != nil {
+							panic(err)
+						}
+					*/
+				}
+				fmt.Println("goroutie done")
+			}(cp)
+			wg.Wait()
 		}
-	*/
+	}()
+
 	fmt.Println("csv begin")
-
-	err = gocsv.MarshalFile(&messages, featureFile)
-	if err != nil {
-		log.Fatal(err)
+	for {
+		v := <-ch
+		if bytes.Equal(v, []byte{'q'}) {
+			break
+		} else {
+			var one kafkaMessage
+			err := json.Unmarshal(v, &one)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if err := w.Write(one.toSlice()); err != nil {
+				log.Fatal(err)
+			}
+		}
 	}
+}
 
+func (one *kafkaMessage) toSlice() []string {
+	ret := make([]string, 0)
+	ret = append(ret, one.Feature.SrcIp.String())
+	ret = append(ret, one.Feature.DstIp.String())
+	ret = append(ret, strconv.FormatUint(uint64(one.Feature.SrcPort), 10))
+	ret = append(ret, strconv.FormatUint(uint64(one.Feature.DstPort), 10))
+	ret = append(ret, strconv.FormatUint(uint64(one.Feature.TransportLayer), 10))
+	ret = append(ret, strconv.FormatFloat(one.Feature.UpTimeMean, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.UpTimeStd, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.UpTimeMin, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.UpTimeMax, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.DownTimeMean, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.DownTimeStd, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.DownTimeMin, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.DownTimeMax, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.TimeMean, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.TimeStd, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.TimeMin, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.TimeMax, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.UpPacketLenMean, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.UpPacketLenStd, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.UpPacketLenMin, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.UpPacketLenMax, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.DownPacketLenMean, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.DownPacketLenStd, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.DownPacketLenMin, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.DownPacketLenMax, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.PacketLenMean, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.PacketLenStd, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.PacketLenMin, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.PacketLenMax, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.Duration, 'f', 4, 64))
+	ret = append(ret, strconv.Itoa(one.Feature.UpPacketNum))
+	ret = append(ret, strconv.FormatFloat(one.Feature.UpPacketNumMinute, 'f', 4, 64))
+	ret = append(ret, strconv.Itoa(one.Feature.DownPacketNum))
+	ret = append(ret, strconv.FormatFloat(one.Feature.DownPacketNumMinute, 'f', 4, 64))
+	ret = append(ret, strconv.Itoa(one.Feature.PacketNum))
+	ret = append(ret, strconv.FormatFloat(one.Feature.PacketNumMinute, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.DownUpPacketPercent, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.UpHeadLenPercent, 'f', 4, 64))
+	ret = append(ret, strconv.FormatFloat(one.Feature.DownHeadLenPercent, 'f', 4, 64))
+	ret = append(ret, strconv.Itoa(one.Feature.ExtensionNum))
+	ret = append(ret, one.Feature.ServerName)
+	return ret
 }
