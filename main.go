@@ -131,7 +131,6 @@ func main() {
 	if err != nil {
 		log.Fatalln("sarama.NewConsumer Failed: ", err)
 	}
-	defer consumer.Close()
 
 	partitionList, err := consumer.Partitions("test")
 	if err != nil {
@@ -140,7 +139,7 @@ func main() {
 
 	ch := make(chan []byte)
 
-	fmt.Println(len(partitionList))
+	fmt.Println(partitionList)
 	go func() {
 		var wg sync.WaitGroup
 		for partition := range partitionList {
@@ -167,8 +166,8 @@ func main() {
 				}
 				fmt.Println("goroutie done")
 			}(cp)
-			wg.Wait()
 		}
+		wg.Wait()
 	}()
 
 	fmt.Println("csv begin")
@@ -178,13 +177,15 @@ func main() {
 			break
 		} else {
 			var one kafkaMessage
-			err := json.Unmarshal(v, &one)
+			err = json.Unmarshal(v, &one)
 			if err != nil {
 				log.Fatal(err)
 			}
-			if err := w.Write(one.toSlice()); err != nil {
-				log.Fatal(err)
+			err = w.Write(one.toSlice())
+			if err != nil {
+				panic(err)
 			}
+			w.Flush()
 		}
 	}
 }
